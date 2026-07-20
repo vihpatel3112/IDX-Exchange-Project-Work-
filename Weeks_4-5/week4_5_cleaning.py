@@ -65,11 +65,43 @@ def save_csv(df, name):
 # ════════════════════════════════════════════════════════════════════════
 # STEP 1 — CONVERT DATE COLUMNS
 # ════════════════════════════════════════════════════════════════════════
+def parse_mixed_dates(series):
+    """
+    Two-pass date parser that handles mixed formats in one column
+    (same approach used in mortgage_rate_enrichment.py):
+      Pass 1 - infer_datetime_format=True (handles M/D/YYYY and ISO 8601)
+      Pass 2 - explicit format="%Y-%m-%d" for any nulls that remain
+    Falls back to format="mixed" on pandas 2.0+ if infer_datetime_format
+    is unavailable.
+    """
+    raw = series.copy()
+
+    # Pass 1
+    try:
+        parsed = pd.to_datetime(raw, errors="coerce", infer_datetime_format=True)
+    except TypeError:
+        # pandas 2.0+ deprecated infer_datetime_format; use format="mixed"
+        parsed = pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=False)
+
+    # Pass 2: retry remaining nulls with explicit YYYY-MM-DD
+    still_null = parsed.isna() & raw.notna() & (raw.astype(str).str.strip() != "")
+    retry_count = int(still_null.sum())
+    if retry_count > 0:
+        retried = pd.to_datetime(raw[still_null], format="%Y-%m-%d", errors="coerce")
+        parsed = parsed.copy()
+        parsed.loc[still_null] = retried
+        recovered = int(retried.notna().sum())
+        print(f"      Two-pass date fix: {retry_count:,} nulls retried with YYYY-MM-DD, "
+              f"{recovered:,} recovered, {retry_count - recovered:,} still null")
+
+    return parsed
+
+
 def convert_dates(df, cols, label):
     """
-    Converts the given columns from plain text to real pandas datetime values.
-    errors="coerce" means: if a value can't be understood as a date, turn it
-    into NaT (pandas' version of a missing date) instead of crashing.
+    Converts the given columns from plain text to real pandas datetime values,
+    using the two-pass parse_mixed_dates() helper above so both M/D/YYYY and
+    YYYY-MM-DD formatted strings in the same column get parsed correctly.
     """
     print(f"\n[{label}] Converting date columns: {cols}")
     for col in cols:
@@ -80,7 +112,7 @@ def convert_dates(df, cols, label):
         # How many values were already blank BEFORE we touch anything.
         missing_before = df[col].isna().sum()
 
-        df[col] = pd.to_datetime(df[col], errors="coerce")
+        df[col] = parse_mixed_dates(df[col])
 
         # Any value that is missing now but was NOT missing before must have
         # failed to parse as a date (e.g. a typo or bad format).
